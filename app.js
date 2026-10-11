@@ -100,7 +100,7 @@ document.querySelectorAll('a[href^="https://play.google.com"], a[href^="https://
 // Cinematic entry, scroll telemetry and pointer feedback keep the page alive without adding assets.
 const pageLoader = document.querySelector('#page-loader');
 window.addEventListener('load', () => {
-  window.setTimeout(() => pageLoader?.classList.add('is-done'), 650);
+  window.setTimeout(() => { pageLoader?.classList.add('is-done'); document.body.classList.add('is-ready'); }, 650);
 });
 
 const progressBar = document.querySelector('.scroll-progress i');
@@ -149,138 +149,86 @@ document.querySelectorAll('.shot').forEach((shot) => {
 });
 
 
-// Scroll Action Mode: turns the long page into a reactive mission sequence.
+// Smooth cinematic scroll: one lerped loop drives parallax, HUD and ticker. Only transform/opacity are animated.
 const actionSections = [...document.querySelectorAll('.action-section')];
 const missionValue = document.querySelector('#scroll-mission-value');
 const missionName = document.querySelector('#scroll-mission-name');
 const missionBar = document.querySelector('.scroll-mission > i em');
 const missionHud = document.querySelector('.scroll-mission');
 const reticle = document.querySelector('.tactical-reticle');
-const actionFlash = document.querySelector('.action-flash');
-const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-let scrollTicking = false;
-let lastScrollY = window.scrollY;
+const ticker = document.querySelector('.signal-ticker');
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const finePointer = window.matchMedia('(pointer: fine)').matches;
+
+// Parallax layers: [element, strength]. Positive strength moves slower than the page.
+const layers = [
+  ['.hero-proof', -.07], ['.hero-hud.hud-a', .05], ['.hero-hud.hud-b', -.04], ['.hero-hud.hud-c', .06],
+  ['.proof-stamp', .09], ['.creator-photo-wrap', -.05], ['.creator-copy', .03],
+  ['.final-crosshair', -.08], ['.screens .shot:nth-child(2)', -.045], ['.screens .shot:nth-child(3)', .04]
+].map(([selector, strength]) => [document.querySelector(selector), strength]).filter(([el]) => el);
+
+let currentY = window.scrollY;
+let targetY = window.scrollY;
+let velocity = 0;
+let rafId = 0;
 let lastSection = '';
-let flashTimer;
 
-function triggerImpact(event) {
-  if (prefersReducedMotion || !actionFlash) return;
-  const velocity = Math.min(1, Math.abs(window.scrollY - lastScrollY) / 85);
-  if (velocity < .42) return;
-  const x = event?.clientX ?? window.innerWidth * .5;
-  const y = event?.clientY ?? window.innerHeight * .55;
-  actionFlash.style.setProperty('--impact-x', `${x}px`);
-  actionFlash.style.setProperty('--impact-y', `${y}px`);
-  actionFlash.classList.remove('is-hit');
-  if (velocity > .72) {
-    document.body.classList.add('action-hit');
-    reticle?.classList.add('is-locking');
-    actionFlash.classList.add('is-heavy');
-  }
-  window.clearTimeout(flashTimer);
-  requestAnimationFrame(() => actionFlash.classList.add('is-hit'));
-  flashTimer = window.setTimeout(() => {
-    actionFlash.classList.remove('is-hit', 'is-heavy');
-    document.body.classList.remove('action-hit');
-    reticle?.classList.remove('is-locking');
-  }, velocity > .72 ? 720 : 560);
-}
-
-function updateActionScene() {
-  const y = window.scrollY;
-  const center = y + window.innerHeight * .48;
+function updateActiveSection() {
+  const center = targetY + window.innerHeight * .5;
   let active = actionSections[0];
+  let best = Infinity;
   actionSections.forEach((section) => {
-    const rect = section.getBoundingClientRect();
-    const sectionTop = rect.top + y;
-    const distance = Math.abs(center - (sectionTop + rect.height * .38));
-    if (!active || distance < Math.abs(center - (active.offsetTop + active.offsetHeight * .38))) active = section;
-    const progress = Math.max(-1, Math.min(1, (center - sectionTop) / Math.max(rect.height, 1) - .35));
-    if (!prefersReducedMotion) {
-      section.style.setProperty('--scroll-shift', `${progress * -12}px`);
-      section.style.setProperty('--section-scale', `${1 - Math.abs(progress) * .012}`);
-      section.style.setProperty('--section-x', `${progress * 18}`);
-    }
+    const top = section.offsetTop;
+    const distance = center < top ? top - center : Math.max(0, center - (top + section.offsetHeight));
+    if (distance < best) { best = distance; active = section; }
   });
-  if (active) {
-    const id = active.dataset.mission;
-    if (id !== lastSection) {
-      lastSection = id;
-      missionHud?.classList.remove('is-changing');
-      requestAnimationFrame(() => missionHud?.classList.add('is-changing'));
-      missionValue && (missionValue.textContent = id);
-      missionName && (missionName.textContent = active.dataset.missionName);
-      active.classList.add('is-current');
-      document.querySelectorAll('.action-section').forEach((section) => { if (section !== active) section.classList.remove('is-current'); });
-      active.querySelector('.intel-cards')?.classList.add('is-live');
-      active.querySelector('.creator-photo-wrap')?.classList.add('is-live');
-    }
-    missionBar && (missionBar.style.width = `${Math.max(20, Number(id) * 20)}%`);
-  }
-  const viewport = window.innerHeight;
-  document.querySelectorAll('.screens .shot').forEach((shot, index) => {
-    if (prefersReducedMotion) return;
-    const rect = shot.getBoundingClientRect();
-    const offset = (rect.top + rect.height / 2 - viewport / 2) / viewport;
-    shot.style.setProperty('--shot-shift', `${Math.max(-12, Math.min(12, offset * (index % 2 ? 7 : -5)))}px`);
-  });
-  reticle?.style.setProperty('rotate', `${(y * .05) % 360}deg`);
-  lastScrollY = y;
-  scrollTicking = false;
+  if (!active || active.dataset.mission === lastSection) return;
+  lastSection = active.dataset.mission;
+  missionHud?.classList.remove('is-changing');
+  requestAnimationFrame(() => missionHud?.classList.add('is-changing'));
+  if (missionValue) missionValue.textContent = lastSection;
+  if (missionName) missionName.textContent = active.dataset.missionName;
+  if (missionBar) missionBar.style.width = `${Math.max(20, Number(lastSection) * 20)}%`;
+  actionSections.forEach((section) => section.classList.toggle('is-current', section === active));
+  active.querySelector('.intel-cards')?.classList.add('is-live');
+  active.querySelector('.creator-photo-wrap')?.classList.add('is-live');
 }
-window.addEventListener('scroll', () => {
-  triggerImpact();
-  if (!scrollTicking) {
-    window.requestAnimationFrame(updateActionScene);
-    scrollTicking = true;
+
+function frame() {
+  targetY = window.scrollY;
+  const delta = targetY - currentY;
+  currentY += delta * .12;
+  velocity += (delta - velocity) * .2;
+  const vh = window.innerHeight;
+  if (!reduceMotion) {
+    layers.forEach(([el, strength]) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom < -200 || rect.top > vh + 200) return;
+      const offset = (rect.top + rect.height / 2 - vh / 2);
+      el.style.translate = `0 ${(offset * strength).toFixed(1)}px`;
+    });
+    if (ticker) ticker.style.setProperty('--ticker-skew', `${Math.max(-4, Math.min(4, velocity * .06)).toFixed(2)}deg`);
+    reticle?.style.setProperty('rotate', `${(currentY * .05) % 360}deg`);
   }
-}, { passive: true });
-window.addEventListener('resize', updateActionScene, { passive: true });
-updateActionScene();
+  updateActiveSection();
+  rafId = (Math.abs(delta) > .3 || Math.abs(velocity) > .3) ? requestAnimationFrame(frame) : 0;
+}
+function kick() { if (!rafId) rafId = requestAnimationFrame(frame); }
+window.addEventListener('scroll', kick, { passive: true });
+window.addEventListener('resize', kick, { passive: true });
+kick();
 
-// A deliberate click impact makes all primary controls feel like mission controls.
-document.querySelectorAll('.button-primary, .nav-cta, .text-link').forEach((control) => {
-  control.addEventListener('pointerdown', (event) => triggerImpact(event));
-});
-
-
-// Heavy scroll choreography: replay the entrance animation every time a mission section is entered.
-let previousSection = null;
-let heavyFlashTimer;
-function heavySectionImpact(section, direction = 1) {
-  if (!section || prefersReducedMotion) return;
-  document.body.classList.remove('action-hit');
-  section.classList.remove('is-entering');
-  reticle?.classList.remove('is-locking');
-  actionFlash?.classList.remove('is-heavy');
-  requestAnimationFrame(() => {
-    document.body.classList.add('action-hit');
-    section.classList.add('is-entering');
-    reticle?.classList.add('is-locking');
-    if (actionFlash) {
-      actionFlash.style.setProperty('--impact-x', direction > 0 ? '72%' : '28%');
-      actionFlash.style.setProperty('--impact-y', '48%');
-      actionFlash.classList.add('is-heavy');
-    }
-    window.clearTimeout(heavyFlashTimer);
-    heavyFlashTimer = window.setTimeout(() => {
-      document.body.classList.remove('action-hit');
-      section.classList.remove('is-entering');
-      reticle?.classList.remove('is-locking');
-      actionFlash?.classList.remove('is-heavy');
-    }, 920);
+// Soft magnetic pull on primary buttons (mouse only).
+if (finePointer && !reduceMotion) {
+  document.querySelectorAll('.button-primary, .nav-cta').forEach((button) => {
+    button.addEventListener('pointermove', (event) => {
+      const rect = button.getBoundingClientRect();
+      const x = (event.clientX - rect.left - rect.width / 2) * .14;
+      const y = (event.clientY - rect.top - rect.height / 2) * .22;
+      button.style.translate = `${x.toFixed(1)}px ${y.toFixed(1)}px`;
+    });
+    button.addEventListener('pointerleave', () => { button.style.translate = ''; });
   });
 }
-const heavyObserver = 'IntersectionObserver' in window ? new IntersectionObserver((entries) => {
-  entries.forEach((entry) => {
-    if (!entry.isIntersecting || entry.intersectionRatio < .32) return;
-    const section = entry.target;
-    const current = section.dataset.mission;
-    if (current !== previousSection) {
-      const direction = Number(current || 1) >= Number(previousSection || 0) ? 1 : -1;
-      previousSection = current;
-      heavySectionImpact(section, direction);
-    }
-  });
-}, { threshold: [.32, .58] }) : null;
-if (heavyObserver) actionSections.forEach((section) => heavyObserver.observe(section));
+
+window.setTimeout(() => { pageLoader?.classList.add('is-done'); document.body.classList.add('is-ready'); }, 4000);
