@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://princepan979851-pixel.github.io/The-killer/sitemap.xml
